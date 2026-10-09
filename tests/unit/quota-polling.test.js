@@ -1,0 +1,252 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  applyClaudeLoginStatus,
+  enabledProviders,
+  isUserAway,
+  missedRefreshCycle,
+  providerObservationMs,
+  providerRequestFloor,
+  providerRetryDelay,
+  resumeGraceDeadline,
+  settleProviders,
+} from "../../src/quota-polling.js";
+import {
+  compactProviderName,
+  compactWindowLabel,
+  displayedPercent,
+  quotaTone,
+  usageDisplayLabel,
+  visibleProviders,
+  WIDGET_PROVIDERS,
+  widgetWindows,
+} from "../../src/widget-model.js";
+
+const defaults = [60_000, 120_000, 300_000];
+const claude = { pollMs: 360_000 };
+
+test("Claude local login checks preserve cooldown unless credentials change", () => {
+  const state = { backoffUntil: 60000, lastAttempt: 200, failures: 3 };
+  assert.equal(applyClaudeLoginStatus(state, { generation: 10, issue: null }), null);
+  assert.equal(state.backoffUntil, 60000);
+  assert.equal(applyClaudeLoginStatus(state, { generation: 10, issue: "Run /login" }), "Run /login");
+  assert.equal(state.backoffUntil, 60000);
+  applyClaudeLoginStatus(state, { generation: 0, issue: null });
+  assert.equal(state.backoffUntil, 60000);
+  applyClaudeLoginStatus(state, { generation: 11, issue: null });
+  assert.equal(state.backoffUntil, 0);
+  assert.equal(state.lastAttempt, 0);
+  assert.equal(state.failures, 0);
+});
+
+test("first login releases an unsigned profile without letting failed reads reset existing cooldowns", () => {
+  const state = { lastAttempt: 500, backoffUntil: 60000, recheckAfter: 70000, failures: 2, retryingRateLimit: true };
+  applyClaudeLoginStatus(state, { generation: 0, issue: null });
+  assert.equal(state.credentialGeneration, 0);
+  assert.equal(state.backoffUntil, 60000);
+  applyClaudeLoginStatus(state, { generation: 10, issue: null });
+  assert.equal(state.lastAttempt, 0);
+  assert.equal(state.backoffUntil, 0);
+  assert.equal(state.recheckAfter, 0);
+  assert.equal(state.failures, 0);
+  assert.equal(state.retryingRateLimit, false);
+  state.lastAttempt = 800;
+  state.backoffUntil = 90000;
+  applyClaudeLoginStatus(state, { generation: 0, issue: null });
+  applyClaudeLoginStatus(state, { generation: 10, issue: null });
+  assert.equal(state.credentialGeneration, 10);
+  assert.equal(state.lastAttempt, 800);
+  assert.equal(state.backoffUntil, 90000, "transient credential reads cannot bypass an existing cooldown");
+});
+
+test("Claude pauses at five idle minutes and immediately on lock", () => {
+  assert.equal(isUserAway({ idle_seconds: 299, workstation_locked: false }, 300), false);
+  assert.equal(isUserAway({ idle_seconds: 300, workstation_locked: false }, 300), true);
+  assert.equal(isUserAway({ idle_seconds: 0, workstation_locked: true }, 300), true);
+  assert.equal(isUserAway(null, 300), false);
+});
+
+test("Claude waits after resume without shortening an existing provider delay", () => {
+  assert.equal(resumeGraceDeadline(1_000, 0, 120_000), 121_000);
+  assert.equal(resumeGraceDeadline(1_000, 150_000, 120_000), 150_000);
+});
+
+test("a timer delayed by sleep is treated as a resume instead of an immediate Claude poll", () => {
+  assert.equal(missedRefreshCycle(500_000, 180_000, 180_000), true);
+  assert.equal(missedRefreshCycle(359_999, 180_000, 180_000), false);
+  assert.equal(missedRefreshCycle(500_000, null, 180_000), false);
+});
+
+test("cached Claude rows follow the cooldown the backend reports", () => {
+  // Rust owns the 6/12/24/48/60-minute fallback and five-second edge buffer;
+  // the frontend preserves the exact remaining cooldown it receives.
+  const cooldownStart = { status: "ok", retry_after_seconds: 365 };
+  assert.equal(providerRetryDelay(cooldownStart, claude, 0, defaults), 365_000);
+  assert.equal(providerRetryDelay(cooldownStart, claude, 3, defaults), 365_000);
+  assert.equal(
+    providerRetryDelay({ status: "ok", retry_after_seconds: 1078 }, claude, 0, defaults),
+    1_078_000,
+  );
+});
+
+test("a due 429 retry bypasses only the healthy provider cadence", () => {
+  assert.equal(providerRequestFloor(claude, false, 20_000), 360_000);
+  assert.equal(providerRequestFloor(claude, true, 20_000), 20_000);
+});
+
+test("backend Retry-After deadlines pass through without a frontend cap", () => {
+  assert.equal(
+    providerRetryDelay({ status: "ok", retry_after_seconds: 1078 }, claude, 0, defaults),
+    1_078_000,
+  );
+  assert.equal(
+    providerRetryDelay({ status: "error", retry_after_seconds: 3605 }, claude, 0, defaults),
+    3_605_000,
+  );
+});
+
+test("ordinary errors retain the existing provider-local retry schedule", () => {
+  assert.equal(providerRetryDelay({ status: "error" }, {}, 0, defaults), 60_000);
+  assert.equal(providerRetryDelay({ status: "error" }, {}, 2, defaults), 300_000);
+  assert.equal(providerRetryDelay({ status: "ok" }, claude, 0, defaults), null);
+  assert.equal(
+    providerRetryDelay({ status: "ok", retry_after_seconds: null }, claude, 0, defaults),
+    null,
+  );
+});
+
+test("widget labels quota windows by duration rather than slot", () => {
+  assert.equal(compactWindowLabel({ label: "Session (5h)", window_seconds: 18_000 }), "5h");
+  assert.equal(compactWindowLabel({ label: "Weekly", window_seconds: 604_800 }), "7d");
+  assert.equal(compactWindowLabel({ label: "Monthly", window_seconds: 2_592_000 }), "30d");
+});
+
+test("widget prefers Grok's seven-day pool and falls back to real windows", () => {
+  const windows = [
+    { label: "Daily", window_seconds: 86_400 },
+    { label: "Weekly", window_seconds: 604_800 },
+  ];
+  assert.deepEqual(widgetWindows("grok", windows), [windows[1]]);
+  assert.deepEqual(widgetWindows("grok_bot", windows), [windows[1]]);
+  assert.deepEqual(widgetWindows("codex", windows), windows);
+  const free = [
+    { label: "Fast · 2 / 2 left", window_seconds: null },
+    { label: "Think · 1 / 2 left", window_seconds: null },
+  ];
+  assert.deepEqual(widgetWindows("grok", free), free);
+  assert.deepEqual(widgetWindows("grok_bot", [windows[0]]), [windows[0]]);
+});
+
+test("widget keeps both Antigravity weekly pools and drops the five-hour ones", () => {
+  const windows = [
+    { label: "Weekly · Gemini", window_seconds: 604_800 },
+    { label: "Session (5h) · Gemini", window_seconds: 18_000 },
+    { label: "Weekly · Claude+GPT", window_seconds: 604_800 },
+    { label: "Session (5h) · Claude+GPT", window_seconds: 18_000 },
+  ];
+  assert.deepEqual(widgetWindows("antigravity", windows), [windows[0], windows[2]]);
+  assert.equal(compactWindowLabel(windows[0]), "Gemini");
+  assert.equal(compactWindowLabel(windows[2]), "Claude+GPT");
+});
+
+test("strip shortens provider titles and widget keeps the full name", () => {
+  assert.deepEqual(
+    WIDGET_PROVIDERS.map((provider) => compactProviderName(provider, true)),
+    ["CL", "CO", "AG", "GR", "GB"],
+  );
+  assert.equal(compactProviderName(WIDGET_PROVIDERS[0], false), "Claude");
+});
+
+test("widget colors honor quota severity thresholds", () => {
+  assert.equal(quotaTone(69.9), "ok");
+  assert.equal(quotaTone(70), "warning");
+  assert.equal(quotaTone(90), "critical");
+  assert.equal(quotaTone(80, "normal"), "ok");
+  assert.equal(quotaTone(20, "warning"), "warning");
+  assert.equal(quotaTone(20, "severe"), "critical");
+});
+
+test("usage display can show consumed or remaining allowance", () => {
+  assert.equal(displayedPercent(40, "used"), 40);
+  assert.equal(displayedPercent(40, "remaining"), 60);
+  assert.equal(displayedPercent(-5, "remaining"), 100);
+  assert.equal(displayedPercent(105, "remaining"), 0);
+  assert.equal(usageDisplayLabel("used"), "used");
+  assert.equal(usageDisplayLabel("remaining"), "left");
+});
+
+test("last-updated uses observations, never failed attempt time", () => {
+  assert.equal(providerObservationMs({ status: "error", fetched_at: 2_000 }), null);
+  assert.equal(providerObservationMs({ status: "action_required", fetched_at: 2_000 }), null);
+  assert.equal(providerObservationMs({ status: "ok", fetched_at: 2_000 }), 2_000_000);
+  assert.equal(
+    providerObservationMs({
+      status: "ok",
+      fetched_at: 2_000,
+      stale: { observed_at: 1_000 },
+    }),
+    1_000_000,
+  );
+  assert.equal(
+    providerObservationMs({ status: "ok", fetched_at: 2_000, stale: { observed_at: null } }),
+    null,
+  );
+  assert.equal(providerObservationMs({ status: "unavailable", fetched_at: 3_000 }), 3_000_000);
+});
+
+test("a fast provider settles before a slow sibling finishes", async () => {
+  let releaseSlow;
+  const slow = new Promise((resolve) => {
+    releaseSlow = resolve;
+  });
+  const settled = [];
+  const all = settleProviders(
+    [{ id: "slow" }, { id: "fast" }],
+    async ({ id }) => {
+      if (id === "slow") await slow;
+      return true;
+    },
+    ({ id }) => settled.push(id),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(settled, ["fast"]);
+  releaseSlow();
+  await all;
+  assert.deepEqual(settled, ["fast", "slow"]);
+});
+
+test("a hidden provider leaves the schedule and unknown ids are ignored", () => {
+  const providers = [{ id: "claude" }, { id: "codex" }];
+  assert.deepEqual(enabledProviders(providers, ["claude"]), [providers[1]]);
+  assert.deepEqual(enabledProviders(providers, []), providers);
+  assert.deepEqual(enabledProviders(providers), providers);
+  assert.deepEqual(enabledProviders(providers, ["antigravity"]), providers);
+});
+
+test("Strip uses the shared rule: only ok rows with a finite percent are visible", () => {
+  const usable = { status: "ok", windows: [{ label: "Weekly", percent: 0 }] };
+  const results = {
+    claude: usable,
+    codex: { status: "not_configured" },
+    antigravity: { status: "error", windows: [] },
+    grok: { status: "unavailable" },
+    grok_bot: { status: "ok", windows: [] },
+  };
+  const strip = { strip: true, hidden_providers: [] };
+  const ids = (providers) => providers.map(({ id }) => id);
+  assert.deepEqual(ids(visibleProviders(WIDGET_PROVIDERS, results, [], strip)), ["claude"]);
+  assert.deepEqual(ids(visibleProviders(WIDGET_PROVIDERS, { ...results, codex: usable }, [], strip)), ["claude", "codex"]);
+  for (const status of ["action_required", "error", "unavailable", "not_configured"]) {
+    assert.deepEqual(visibleProviders(WIDGET_PROVIDERS, { claude: { ...usable, status } }, [], strip), []);
+  }
+  assert.deepEqual(ids(visibleProviders(WIDGET_PROVIDERS, { ...results, codex: usable }, ["claude"], strip)), ["codex"]);
+  assert.deepEqual(visibleProviders(WIDGET_PROVIDERS, {}, [], strip), []);
+});
+
+test("visibleProviders without preferences keeps the legacy not_configured filter", () => {
+  const results = { claude: { status: "ok" }, codex: { status: "not_configured" }, grok: { status: "unavailable" } };
+  const ids = (providers) => providers.map(({ id }) => id);
+  assert.deepEqual(ids(visibleProviders(WIDGET_PROVIDERS, results, ["claude"])), ["grok"]);
+  assert.deepEqual(ids(visibleProviders(WIDGET_PROVIDERS, results)), ["claude", "grok"]);
+});

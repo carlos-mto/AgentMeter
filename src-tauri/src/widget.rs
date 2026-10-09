@@ -1,0 +1,1184 @@
+use crate::i18n::Language;
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard,
+    },
+    time::{Duration, Instant},
+};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewWindow,
+};
+
+pub const WINDOW_LABEL: &str = "widget";
+const DEFAULT_WIDGET_WIDTH: f64 = 648.0;
+const DEFAULT_WIDGET_HEIGHT: f64 = 464.0;
+const MIN_WIDGET_WIDTH: f64 = 200.0;
+const MAX_WIDGET_WIDTH: f64 = 720.0;
+const MIN_WIDGET_HEIGHT: f64 = 72.0;
+// Extra account rows scroll inside Widget; the native window stays bounded
+// and still shrinks to its measured content when fewer accounts are shown.
+const MAX_WIDGET_HEIGHT: f64 = 560.0;
+const DEFAULT_STRIP_WIDTH: f64 = 560.0;
+const MIN_STRIP_WIDTH: f64 = 300.0;
+const MAX_STRIP_WIDTH: f64 = 900.0;
+const STRIP_HEIGHT: f64 = 40.0;
+const SCREEN_MARGIN: i32 = 24;
+const USER_DRAG_WINDOW: Duration = Duration::from_secs(30);
+const PROGRAMMATIC_MOVE_WINDOW: Duration = Duration::from_secs(5);
+const PREFERENCES_EVENT: &str = "widget-preferences-changed";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DisplayMode {
+    #[default]
+    Dashboard,
+    Widget,
+    Strip,
+}
+
+impl DisplayMode {
+    pub fn parse(mode: &str) -> Result<Self, String> {
+        match mode {
+            "dashboard" => Ok(Self::Dashboard),
+            "widget" => Ok(Self::Widget),
+            "strip" => Ok(Self::Strip),
+            _ => Err(format!("unknown display mode: {mode}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageDisplay {
+    #[default]
+    Used,
+    Remaining,
+}
+
+impl UsageDisplay {
+    fn parse(mode: &str) -> Result<Self, String> {
+        match mode {
+            "used" => Ok(Self::Used),
+            "remaining" => Ok(Self::Remaining),
+            _ => Err(format!("unknown usage display: {mode}")),
+        }
+    }
+}
+
+/// Extra UI scale on top of Windows DPI scaling, persisted as a percentage.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct WidgetScale(u16);
+
+impl Default for WidgetScale {
+    fn default() -> Self {
+        Self(100)
+    }
+}
+
+impl WidgetScale {
+    fn parse(percent: u16) -> Result<Self, String> {
+        if (100..=300).contains(&percent) && percent % 25 == 0 {
+            Ok(Self(percent))
+        } else {
+            Err("widget size must be 100–300% in steps of 25%".to_string())
+        }
+    }
+
+    fn factor(self) -> f64 {
+        f64::from(self.0) / 100.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WidgetScale {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // A malformed size must not discard unrelated saved positions or modes.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .and_then(|n| Self::parse(n).ok())
+            .unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct WidgetPreferences {
+    pub language: Language,
+    pub visible: bool,
+    pub locked: bool,
+    pub strip: bool,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub strip_x: Option<i32>,
+    pub strip_y: Option<i32>,
+    pub taskbar_overlay: bool,
+    pub hidden_providers: Vec<String>,
+    pub antigravity_claude_gpt_hidden: bool,
+    pub usage_display: UsageDisplay,
+    pub widget_scale: WidgetScale,
+}
+
+impl WidgetPreferences {
+    fn scale_factor(&self) -> f64 {
+        if self.strip {
+            1.0
+        } else {
+            self.widget_scale.factor()
+        }
+    }
+
+    pub fn mode(&self) -> DisplayMode {
+        match (self.visible, self.strip) {
+            (true, true) => DisplayMode::Strip,
+            (true, false) => DisplayMode::Widget,
+            (false, _) => DisplayMode::Dashboard,
+        }
+    }
+
+    fn apply_mode(&mut self, mode: DisplayMode) {
+        match mode {
+            DisplayMode::Dashboard => {
+                self.visible = false;
+                self.strip = false;
+            }
+            DisplayMode::Widget => {
+                self.visible = true;
+                self.strip = false;
+            }
+            DisplayMode::Strip => {
+                self.visible = true;
+                self.strip = true;
+            }
+        }
+    }
+}
+
+pub struct WidgetState {
+    preferences: Mutex<WidgetPreferences>,
+    position_updates_suspended: AtomicBool,
+    user_drag_until: Mutex<Option<Instant>>,
+    programmatic_position: Mutex<Option<(PhysicalPosition<i32>, Instant)>>,
+}
+
+impl WidgetState {
+    pub fn load() -> Self {
+        let preferences = preferences_path()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        Self {
+            preferences: Mutex::new(preferences),
+            position_updates_suspended: AtomicBool::new(false),
+            user_drag_until: Mutex::new(None),
+            programmatic_position: Mutex::new(None),
+        }
+    }
+
+    pub fn snapshot(&self) -> Result<WidgetPreferences, String> {
+        Ok(self.lock()?.clone())
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, WidgetPreferences>, String> {
+        self.preferences
+            .lock()
+            .map_err(|_| "widget preferences are unavailable".to_string())
+    }
+
+    fn replace(&self, preferences: WidgetPreferences) -> Result<WidgetPreferences, String> {
+        persist(&preferences)?;
+        *self.lock()? = preferences.clone();
+        Ok(preferences)
+    }
+
+    fn suspend_position_updates(&self, suspended: bool) {
+        self.position_updates_suspended
+            .store(suspended, Ordering::Release);
+    }
+
+    fn begin_user_drag(&self) -> Result<(), String> {
+        *self
+            .user_drag_until
+            .lock()
+            .map_err(|_| "widget drag state is unavailable".to_string())? =
+            Some(Instant::now() + USER_DRAG_WINDOW);
+        Ok(())
+    }
+
+    fn end_user_drag(&self) {
+        if let Ok(mut until) = self.user_drag_until.lock() {
+            *until = None;
+        }
+    }
+
+    fn user_drag_active(&self) -> bool {
+        let Ok(mut until) = self.user_drag_until.lock() else {
+            return false;
+        };
+        if until.is_some_and(|deadline| deadline > Instant::now()) {
+            return true;
+        }
+        *until = None;
+        false
+    }
+
+    fn continue_user_drag(&self) -> bool {
+        let Ok(mut until) = self.user_drag_until.lock() else {
+            return false;
+        };
+        if until.is_some_and(|deadline| deadline > Instant::now()) {
+            // Native drag loops do not provide a portable end event. Each real
+            // WM_MOVE is proof that the gesture continues, so keep the final
+            // drop eligible even when a careful multi-monitor drag exceeds 30s.
+            *until = Some(Instant::now() + USER_DRAG_WINDOW);
+            return true;
+        }
+        *until = None;
+        false
+    }
+
+    fn expect_programmatic_position(&self, position: PhysicalPosition<i32>) {
+        if let Ok(mut expected) = self.programmatic_position.lock() {
+            *expected = Some((position, Instant::now() + PROGRAMMATIC_MOVE_WINDOW));
+        }
+    }
+
+    fn is_programmatic_position(&self, position: PhysicalPosition<i32>) -> bool {
+        let Ok(mut expected) = self.programmatic_position.lock() else {
+            return false;
+        };
+        let matches = expected.is_some_and(|(candidate, deadline)| {
+            deadline > Instant::now() && candidate == position
+        });
+        if matches || expected.is_some_and(|(_, deadline)| deadline <= Instant::now()) {
+            *expected = None;
+        }
+        matches
+    }
+
+    pub fn remember_position(&self, position: PhysicalPosition<i32>) -> Result<(), String> {
+        if self.position_updates_suspended.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self.is_programmatic_position(position) || !self.continue_user_drag() {
+            return Ok(());
+        }
+        let mut preferences = self.snapshot()?;
+        if !store_position(&mut preferences, position) {
+            return Ok(());
+        }
+        self.replace(preferences).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScreenRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl ScreenRect {
+    fn from_monitor(monitor: &tauri::Monitor) -> Self {
+        Self {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        }
+    }
+
+    fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && i64::from(x) < i64::from(self.x) + i64::from(self.width)
+            && y >= self.y
+            && i64::from(y) < i64::from(self.y) + i64::from(self.height)
+    }
+}
+
+fn preferences_path() -> Option<PathBuf> {
+    crate::accounts::data_dir()
+        .ok()
+        .map(|dir| dir.join("widget.json"))
+}
+
+fn persist(preferences: &WidgetPreferences) -> Result<(), String> {
+    let path = preferences_path()
+        .ok_or_else(|| "could not locate the local application data directory".to_string())?;
+    persist_to(&path, preferences)
+}
+
+fn persist_to(path: &Path, preferences: &WidgetPreferences) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "widget preferences path has no parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create widget preferences directory: {error}"))?;
+    let json = serde_json::to_string_pretty(preferences)
+        .map_err(|error| format!("cannot serialize widget preferences: {error}"))?;
+    // A torn write makes load() fall back to defaults and lose the saved view,
+    // positions, and hidden providers together. Write aside and rename so the
+    // file always holds either the old preferences or the new ones.
+    let staging = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&staging, json)
+        .map_err(|error| format!("cannot save widget preferences: {error}"))?;
+    fs::rename(&staging, path).map_err(|error| {
+        let _ = fs::remove_file(&staging);
+        format!("cannot replace widget preferences: {error}")
+    })
+}
+
+fn screens(window: &WebviewWindow) -> Result<(Vec<ScreenRect>, Option<ScreenRect>), String> {
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| error.to_string())?;
+    let screens = monitors.iter().map(ScreenRect::from_monitor).collect();
+    let primary = window
+        .primary_monitor()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .map(ScreenRect::from_monitor);
+    Ok((screens, primary))
+}
+
+fn saved_position(preferences: &WidgetPreferences) -> Option<PhysicalPosition<i32>> {
+    let coordinates = if preferences.strip {
+        preferences.strip_x.zip(preferences.strip_y)
+    } else {
+        preferences.x.zip(preferences.y)
+    };
+    coordinates.map(|(x, y)| PhysicalPosition::new(x, y))
+}
+
+fn should_place_after_resize(preferences: &WidgetPreferences) -> bool {
+    saved_position(preferences).is_none()
+}
+
+fn store_position(preferences: &mut WidgetPreferences, position: PhysicalPosition<i32>) -> bool {
+    let current = if preferences.strip {
+        preferences.strip_x.zip(preferences.strip_y)
+    } else {
+        preferences.x.zip(preferences.y)
+    };
+    if current == Some((position.x, position.y)) {
+        return false;
+    }
+    if preferences.strip {
+        preferences.strip_x = Some(position.x);
+        preferences.strip_y = Some(position.y);
+    } else {
+        preferences.x = Some(position.x);
+        preferences.y = Some(position.y);
+    }
+    true
+}
+
+/// Hide or show one provider in the persisted hide-list. Unknown ids are kept
+/// as written (a future provider may claim them); only a blank id is refused.
+/// Returns whether the list changed.
+fn toggle_hidden(preferences: &mut WidgetPreferences, id: &str, hidden: bool) -> bool {
+    let id = id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    let previous = preferences.hidden_providers.clone();
+    preferences.hidden_providers.retain(|entry| entry != id);
+    if hidden {
+        preferences.hidden_providers.push(id.to_string());
+    }
+    preferences.hidden_providers.sort();
+    preferences.hidden_providers.dedup();
+    preferences.hidden_providers != previous
+}
+
+fn clamped_position(
+    saved: Option<PhysicalPosition<i32>>,
+    window_size: PhysicalSize<u32>,
+    screens: &[ScreenRect],
+    primary: Option<ScreenRect>,
+) -> Option<PhysicalPosition<i32>> {
+    if let Some(saved) = saved {
+        if let Some(screen) = screens
+            .iter()
+            .find(|screen| screen.contains(saved.x, saved.y))
+        {
+            let max_x =
+                i64::from(screen.x) + i64::from(screen.width) - i64::from(window_size.width);
+            let max_y =
+                i64::from(screen.y) + i64::from(screen.height) - i64::from(window_size.height);
+            return Some(PhysicalPosition::new(
+                i64::from(saved.x).clamp(i64::from(screen.x), max_x.max(i64::from(screen.x)))
+                    as i32,
+                i64::from(saved.y).clamp(i64::from(screen.y), max_y.max(i64::from(screen.y)))
+                    as i32,
+            ));
+        }
+    }
+
+    let screen = primary.or_else(|| screens.first().copied())?;
+    let x = i64::from(screen.x) + i64::from(screen.width)
+        - i64::from(window_size.width)
+        - i64::from(SCREEN_MARGIN);
+    Some(PhysicalPosition::new(
+        x.max(i64::from(screen.x)) as i32,
+        screen.y.saturating_add(SCREEN_MARGIN),
+    ))
+}
+
+fn place_on_screen(
+    window: &WebviewWindow,
+    preferences: &WidgetPreferences,
+) -> Result<PhysicalPosition<i32>, String> {
+    let window_size = window.outer_size().map_err(|error| error.to_string())?;
+    let (screens, primary) = screens(window)?;
+    clamped_position(saved_position(preferences), window_size, &screens, primary)
+        .ok_or_else(|| "Windows did not report an available monitor".to_string())
+}
+
+fn emit_preferences(app: &AppHandle, preferences: &WidgetPreferences) {
+    let _ = app.emit(PREFERENCES_EVENT, preferences);
+}
+
+fn prepare_document(window: &WebviewWindow, preferences: &WidgetPreferences) {
+    let mode = match preferences.mode() {
+        DisplayMode::Strip => "strip",
+        _ => "widget",
+    };
+    let _ = window.eval(format!(
+        "document.documentElement.dataset.mode='{mode}';document.documentElement.dataset.locked='{}';document.documentElement.dataset.taskbarOverlay='{}';document.documentElement.style.setProperty('--widget-scale','{}');",
+        preferences.locked,
+        preferences.taskbar_overlay,
+        preferences.scale_factor()
+    ));
+}
+
+fn initial_size(preferences: &WidgetPreferences) -> LogicalSize<f64> {
+    if preferences.strip {
+        LogicalSize::new(DEFAULT_STRIP_WIDTH, STRIP_HEIGHT)
+    } else {
+        let scale = preferences.scale_factor();
+        LogicalSize::new(DEFAULT_WIDGET_WIDTH * scale, DEFAULT_WIDGET_HEIGHT * scale)
+    }
+}
+
+fn content_size(preferences: &WidgetPreferences, width: f64, height: f64) -> LogicalSize<f64> {
+    if preferences.strip {
+        let width = if width.is_finite() {
+            width.clamp(MIN_STRIP_WIDTH, MAX_STRIP_WIDTH)
+        } else {
+            DEFAULT_STRIP_WIDTH
+        };
+        LogicalSize::new(width, STRIP_HEIGHT)
+    } else {
+        let scale = preferences.scale_factor();
+        let width = if width.is_finite() {
+            width.clamp(MIN_WIDGET_WIDTH * scale, MAX_WIDGET_WIDTH * scale)
+        } else {
+            DEFAULT_WIDGET_WIDTH * scale
+        };
+        let height = if height.is_finite() {
+            height.clamp(MIN_WIDGET_HEIGHT * scale, MAX_WIDGET_HEIGHT * scale)
+        } else {
+            DEFAULT_WIDGET_HEIGHT * scale
+        };
+        LogicalSize::new(width, height)
+    }
+}
+
+pub fn apply(app: &AppHandle, state: &WidgetState) -> Result<WidgetPreferences, String> {
+    let window = app
+        .get_webview_window(WINDOW_LABEL)
+        .ok_or_else(|| "widget window is unavailable".to_string())?;
+    let preferences = state.snapshot()?;
+    if preferences.visible {
+        prepare_document(&window, &preferences);
+    }
+    state.end_user_drag();
+    state.suspend_position_updates(true);
+    let result = (|| -> Result<(), String> {
+        if !preferences.visible {
+            return window.hide().map_err(|error| error.to_string());
+        }
+        window.hide().map_err(|error| error.to_string())?;
+        window
+            .set_size(initial_size(&preferences))
+            .map_err(|error| error.to_string())?;
+        let position = place_on_screen(&window, &preferences)?;
+        state.expect_programmatic_position(position);
+        window
+            .set_position(position)
+            .map_err(|error| error.to_string())?;
+        window.show().map_err(|error| error.to_string())
+    })();
+    state.suspend_position_updates(false);
+    result?;
+    let preferences = state.replace(preferences)?;
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+pub fn set_mode(
+    app: &AppHandle,
+    state: &WidgetState,
+    mode: &str,
+) -> Result<WidgetPreferences, String> {
+    let previous = state.snapshot()?;
+    let next = preferences_for_mode(previous.clone(), mode)?;
+    state.replace(next)?;
+    match apply(app, state) {
+        Ok(preferences) => Ok(preferences),
+        Err(error) => {
+            let _ = state.replace(previous);
+            let _ = apply(app, state);
+            Err(error)
+        }
+    }
+}
+
+fn preferences_for_mode(
+    mut preferences: WidgetPreferences,
+    mode: &str,
+) -> Result<WidgetPreferences, String> {
+    preferences.apply_mode(DisplayMode::parse(mode)?);
+    Ok(preferences)
+}
+
+pub fn set_locked(
+    app: &AppHandle,
+    state: &WidgetState,
+    locked: bool,
+) -> Result<WidgetPreferences, String> {
+    let mut preferences = state.snapshot()?;
+    preferences.locked = locked;
+    let preferences = state.replace(preferences)?;
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+pub fn set_scale(
+    app: &AppHandle,
+    state: &WidgetState,
+    percent: u16,
+) -> Result<WidgetPreferences, String> {
+    let scale = WidgetScale::parse(percent)?;
+    let mut preferences = state.snapshot()?;
+    if preferences.widget_scale == scale {
+        return Ok(preferences);
+    }
+    preferences.widget_scale = scale;
+    let preferences = state.replace(preferences)?;
+    // The webview remeasures its scaled content. Do not apply a mode change or
+    // overwrite the user's coordinates just because the UI grew.
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+pub fn set_provider_hidden(
+    app: &AppHandle,
+    state: &WidgetState,
+    id: &str,
+    hidden: bool,
+) -> Result<WidgetPreferences, String> {
+    if id.trim().is_empty() {
+        return Err("provider id is required".to_string());
+    }
+    let previous = state.snapshot()?;
+    let mut next = previous.clone();
+    if !toggle_hidden(&mut next, id, hidden) {
+        return Ok(previous);
+    }
+    let preferences = state.replace(next)?;
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+pub fn set_antigravity_claude_gpt_hidden(
+    app: &AppHandle,
+    state: &WidgetState,
+    hidden: bool,
+) -> Result<WidgetPreferences, String> {
+    let mut preferences = state.snapshot()?;
+    if preferences.antigravity_claude_gpt_hidden == hidden {
+        return Ok(preferences);
+    }
+    preferences.antigravity_claude_gpt_hidden = hidden;
+    let preferences = state.replace(preferences)?;
+    // Presentation only: preserve raw quotas, polling, view, pin and position.
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+pub fn set_language(
+    app: &AppHandle,
+    state: &WidgetState,
+    language: &str,
+) -> Result<WidgetPreferences, String> {
+    let language = Language::parse(language)?;
+    let mut preferences = state.snapshot()?;
+    if preferences.language == language {
+        return Ok(preferences);
+    }
+    preferences.language = language;
+    let preferences = state.replace(preferences)?;
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+pub fn set_usage_display(
+    app: &AppHandle,
+    state: &WidgetState,
+    mode: &str,
+) -> Result<WidgetPreferences, String> {
+    let previous = state.snapshot()?;
+    let usage_display = UsageDisplay::parse(mode)?;
+    if previous.usage_display == usage_display {
+        return Ok(previous);
+    }
+    let mut next = previous;
+    next.usage_display = usage_display;
+    let preferences = state.replace(next)?;
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn set_taskbar_overlay(
+    app: &AppHandle,
+    state: &WidgetState,
+    enabled: bool,
+) -> Result<WidgetPreferences, String> {
+    let previous = state.snapshot()?;
+    if previous.taskbar_overlay == enabled {
+        return Ok(previous);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if enabled {
+        return Err("taskbar overlay is available only on Windows".to_string());
+    }
+
+    let mut next = previous.clone();
+    next.taskbar_overlay = enabled;
+
+    #[cfg(target_os = "windows")]
+    if enabled && next.mode() == DisplayMode::Strip {
+        crate::windows::taskbar_overlay::snap_with_preferences(app, state, &next)?;
+    }
+
+    let preferences = state.replace(next)?;
+    emit_preferences(app, &preferences);
+    Ok(preferences)
+}
+
+pub fn start_dragging(window: &WebviewWindow, state: &WidgetState) -> Result<(), String> {
+    if window.label() != WINDOW_LABEL {
+        return Err("only the companion window can use the drag command".to_string());
+    }
+    let preferences = state.snapshot()?;
+    if !preferences.strip && preferences.locked {
+        return Err("unlock the widget before moving it".to_string());
+    }
+    state.begin_user_drag()?;
+    if let Err(error) = window.start_dragging() {
+        state.end_user_drag();
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+pub fn resize(
+    window: &WebviewWindow,
+    state: &WidgetState,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if window.label() != WINDOW_LABEL {
+        return Err("only the companion window can resize itself".to_string());
+    }
+    let preferences = state.snapshot()?;
+    let size = content_size(&preferences, width, height);
+
+    state.suspend_position_updates(true);
+    let result = (|| -> Result<(), String> {
+        window.set_size(size).map_err(|error| error.to_string())?;
+        // Once the user has placed a companion, content-driven resizing must
+        // never touch its coordinates. Re-running monitor selection here made
+        // mixed-DPI physical positions look off-screen and snapped a correctly
+        // saved Strip back to the default top-right position a few seconds
+        // after a drag. A never-positioned companion still gets its initial
+        // top-right anchor after the measured size is known.
+        if state.user_drag_active() || !should_place_after_resize(&preferences) {
+            return Ok(());
+        }
+        let position = place_on_screen(window, &preferences)?;
+        state.expect_programmatic_position(position);
+        window
+            .set_position(position)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    state.suspend_position_updates(false);
+    result
+}
+
+pub(crate) fn move_strip_for_taskbar(
+    window: &WebviewWindow,
+    state: &WidgetState,
+    position: PhysicalPosition<i32>,
+) -> Result<(), String> {
+    if window.label() != WINDOW_LABEL {
+        return Err("only the companion window can use taskbar placement".to_string());
+    }
+
+    // Overlay alignment is not a user drag. Move the window and do not persist
+    // — strip_x/strip_y stay the last place the user put it. After restart the
+    // watcher snaps again from that saved long-axis coordinate.
+    state.expect_programmatic_position(position);
+    state.suspend_position_updates(true);
+    let result = window
+        .set_position(position)
+        .map_err(|error| error.to_string());
+    state.suspend_position_updates(false);
+    result
+}
+/// Reassert a companion window after Windows wakes and restores its monitor
+/// topology. Windows can temporarily relocate always-on-top windows while an
+/// external display is still waking; that system move must not replace the
+/// user's saved position.
+pub fn restore_after_resume(app: &AppHandle, state: &WidgetState) -> Result<bool, String> {
+    let preferences = state.snapshot()?;
+    if !preferences.visible || state.user_drag_active() {
+        return Ok(false);
+    }
+    let window = app
+        .get_webview_window(WINDOW_LABEL)
+        .ok_or_else(|| "widget window is unavailable".to_string())?;
+
+    window
+        .set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+    if !window.is_visible().unwrap_or(false) {
+        window.show().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "windows")]
+        crate::windows::taskbar_overlay::restore_companion_visibility(&window)?;
+    }
+
+    let Some(saved) = saved_position(&preferences) else {
+        return Ok(true);
+    };
+    let window_size = window.outer_size().map_err(|error| error.to_string())?;
+    let (screens, _) = screens(&window)?;
+    // Do not fall back to the primary display while a saved monitor is still
+    // waking. A later retry will restore the original screen; a permanent
+    // disconnection is handled by normal mode activation without erasing it.
+    if !screens
+        .iter()
+        .any(|screen| screen.contains(saved.x, saved.y))
+    {
+        return Ok(false);
+    }
+    let Some(position) = clamped_position(Some(saved), window_size, &screens, None) else {
+        return Ok(false);
+    };
+
+    state.suspend_position_updates(true);
+    state.expect_programmatic_position(position);
+    let result = window
+        .set_position(position)
+        .map_err(|error| error.to_string());
+    state.suspend_position_updates(false);
+    result.map(|_| true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screen(x: i32, y: i32, width: u32, height: u32) -> ScreenRect {
+        ScreenRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn new_companion_is_opt_in_unlocked_and_has_independent_positions() {
+        let preferences = WidgetPreferences::default();
+        assert!(!preferences.visible);
+        assert!(!preferences.locked);
+        assert!(!preferences.strip);
+        assert_eq!(preferences.x, None);
+        assert_eq!(preferences.strip_x, None);
+        assert_eq!(preferences.usage_display, UsageDisplay::Used);
+    }
+
+    #[test]
+    fn saved_position_is_clamped_to_its_monitor() {
+        let screens = [screen(100, 50, 1_000, 700)];
+        assert_eq!(
+            clamped_position(
+                Some(PhysicalPosition::new(1_050, 720)),
+                PhysicalSize::new(244, 164),
+                &screens,
+                None,
+            ),
+            Some(PhysicalPosition::new(856, 586))
+        );
+    }
+
+    #[test]
+    fn missing_or_disconnected_position_uses_primary_top_right() {
+        let primary = screen(-1_920, 0, 1_920, 1_080);
+        assert_eq!(
+            clamped_position(
+                Some(PhysicalPosition::new(4_000, 4_000)),
+                PhysicalSize::new(244, 164),
+                &[primary],
+                Some(primary),
+            ),
+            Some(PhysicalPosition::new(-268, 24))
+        );
+    }
+
+    #[test]
+    fn widget_and_strip_positions_are_kept_separately() {
+        let mut preferences = WidgetPreferences::default();
+        assert!(store_position(
+            &mut preferences,
+            PhysicalPosition::new(100, 80)
+        ));
+        preferences.strip = true;
+        assert_eq!(saved_position(&preferences), None);
+        assert!(store_position(
+            &mut preferences,
+            PhysicalPosition::new(500, 300)
+        ));
+        assert_eq!(
+            saved_position(&preferences),
+            Some(PhysicalPosition::new(500, 300))
+        );
+        preferences.strip = false;
+        assert_eq!(
+            saved_position(&preferences),
+            Some(PhysicalPosition::new(100, 80))
+        );
+    }
+
+    #[test]
+    fn content_resize_never_repositions_a_user_placed_companion() {
+        let mut preferences = WidgetPreferences::default();
+        assert!(should_place_after_resize(&preferences));
+
+        preferences.strip = true;
+        preferences.strip_x = Some(9);
+        preferences.strip_y = Some(2_073);
+        assert!(!should_place_after_resize(&preferences));
+
+        preferences.strip = false;
+        preferences.x = Some(285);
+        preferences.y = Some(1_789);
+        assert!(!should_place_after_resize(&preferences));
+    }
+
+    #[test]
+    fn each_real_move_extends_the_drag_window() {
+        let state = WidgetState {
+            preferences: Mutex::new(WidgetPreferences::default()),
+            position_updates_suspended: AtomicBool::new(false),
+            user_drag_until: Mutex::new(Some(Instant::now() + Duration::from_secs(1))),
+            programmatic_position: Mutex::new(None),
+        };
+        let before = *state.user_drag_until.lock().unwrap();
+        assert!(state.continue_user_drag());
+        let after = *state.user_drag_until.lock().unwrap();
+        assert!(after > before);
+    }
+
+    #[test]
+    fn display_modes_are_mutually_exclusive_and_preserve_companion_details() {
+        let original = WidgetPreferences {
+            language: Language::En,
+            visible: true,
+            locked: true,
+            strip: true,
+            x: Some(120),
+            y: Some(80),
+            strip_x: Some(500),
+            strip_y: Some(300),
+            taskbar_overlay: true,
+            hidden_providers: Vec::new(),
+            antigravity_claude_gpt_hidden: true,
+            usage_display: UsageDisplay::Remaining,
+            widget_scale: WidgetScale(200),
+        };
+        let dashboard = preferences_for_mode(original.clone(), "dashboard").unwrap();
+        assert!(!dashboard.visible);
+        assert!(!dashboard.strip);
+        assert!(dashboard.locked);
+        assert_eq!(dashboard.x, Some(120));
+        assert_eq!(dashboard.strip_x, Some(500));
+        assert!(dashboard.taskbar_overlay);
+        assert_eq!(dashboard.usage_display, UsageDisplay::Remaining);
+        assert_eq!(dashboard.widget_scale, WidgetScale(200));
+        assert!(dashboard.antigravity_claude_gpt_hidden);
+
+        let widget = preferences_for_mode(original.clone(), "widget").unwrap();
+        assert!(widget.visible);
+        assert!(!widget.strip);
+
+        let strip = preferences_for_mode(original, "strip").unwrap();
+        assert!(strip.visible);
+        assert!(strip.strip);
+        assert!(preferences_for_mode(strip, "unknown").is_err());
+    }
+
+    #[test]
+    fn display_mode_is_the_visible_strip_pair() {
+        let mut preferences = WidgetPreferences::default();
+        assert_eq!(preferences.mode(), DisplayMode::Dashboard);
+        preferences.apply_mode(DisplayMode::Widget);
+        assert_eq!(preferences.mode(), DisplayMode::Widget);
+        assert!(preferences.visible);
+        assert!(!preferences.strip);
+        preferences.apply_mode(DisplayMode::Strip);
+        assert_eq!(preferences.mode(), DisplayMode::Strip);
+        preferences.apply_mode(DisplayMode::Dashboard);
+        assert_eq!(preferences.mode(), DisplayMode::Dashboard);
+        assert!(!preferences.visible);
+        assert!(!preferences.strip);
+    }
+
+    #[test]
+    fn older_preferences_default_taskbar_overlay_to_off() {
+        let preferences: WidgetPreferences =
+            serde_json::from_str(r#"{"visible":true,"strip":true,"strip_x":8,"strip_y":1040}"#)
+                .unwrap();
+        assert!(preferences.visible);
+        assert!(preferences.strip);
+        assert!(!preferences.taskbar_overlay);
+    }
+
+    #[test]
+    fn older_preferences_default_hidden_providers_to_empty() {
+        let preferences: WidgetPreferences =
+            serde_json::from_str(r#"{"visible":true,"strip":true,"strip_x":8,"strip_y":1040}"#)
+                .unwrap();
+        assert!(preferences.hidden_providers.is_empty());
+        assert_eq!(preferences.usage_display, UsageDisplay::Used);
+    }
+
+    #[test]
+    fn antigravity_pool_visibility_defaults_to_shown_and_round_trips() {
+        let old: WidgetPreferences = serde_json::from_str(
+            r#"{"visible":true,"strip":true,"strip_x":8,"taskbar_overlay":true}"#,
+        )
+        .unwrap();
+        assert!(!old.antigravity_claude_gpt_hidden);
+        for hidden in [true, false] {
+            let preferences = WidgetPreferences {
+                antigravity_claude_gpt_hidden: hidden,
+                ..old.clone()
+            };
+            let restored: WidgetPreferences =
+                serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
+            assert_eq!(restored, preferences);
+        }
+    }
+
+    #[test]
+    fn language_migration_and_bad_values_preserve_companion_preferences() {
+        let old: WidgetPreferences = serde_json::from_str(
+            r#"{"visible":true,"strip":true,"strip_x":42,"taskbar_overlay":true}"#,
+        )
+        .unwrap();
+        assert_eq!(old.language, Language::default());
+        for value in [
+            serde_json::json!("xx"),
+            serde_json::json!(null),
+            serde_json::json!(12),
+        ] {
+            let mut raw = serde_json::to_value(&old).unwrap();
+            raw["language"] = value;
+            let parsed: WidgetPreferences = serde_json::from_value(raw).unwrap();
+            assert_eq!(parsed, old);
+        }
+        for language in [
+            Language::En,
+            Language::Es,
+            Language::Pt,
+            Language::It,
+            Language::De,
+        ] {
+            let preferences = WidgetPreferences {
+                language,
+                ..old.clone()
+            };
+            let parsed: WidgetPreferences =
+                serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
+            assert_eq!(parsed, preferences);
+        }
+    }
+
+    #[test]
+    fn usage_display_accepts_only_persisted_modes() {
+        assert_eq!(UsageDisplay::parse("used").unwrap(), UsageDisplay::Used);
+        assert_eq!(
+            UsageDisplay::parse("remaining").unwrap(),
+            UsageDisplay::Remaining
+        );
+        assert!(UsageDisplay::parse("available").is_err());
+
+        let original = WidgetPreferences {
+            usage_display: UsageDisplay::Remaining,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: WidgetPreferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.usage_display, UsageDisplay::Remaining);
+    }
+
+    #[test]
+    fn widget_scale_defaults_and_bad_values_preserve_other_preferences() {
+        let old: WidgetPreferences = serde_json::from_str(r#"{"visible":true,"x":120}"#).unwrap();
+        assert_eq!(old.widget_scale, WidgetScale(100));
+        assert_eq!(WidgetPreferences::default().widget_scale, WidgetScale(100));
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(99),
+            serde_json::json!(301),
+            serde_json::json!(125.5),
+            serde_json::json!(65536),
+            serde_json::json!("200"),
+            serde_json::Value::Null,
+        ] {
+            let prefs: WidgetPreferences = serde_json::from_value(
+                serde_json::json!({"widget_scale":value,"x":120,"locked":true}),
+            )
+            .unwrap();
+            assert_eq!(prefs.widget_scale, WidgetScale(100));
+            assert_eq!(prefs.x, Some(120));
+            assert!(prefs.locked);
+        }
+    }
+
+    #[test]
+    fn widget_scale_validates_and_round_trips_all_steps() {
+        for percent in (100..=300).step_by(25) {
+            let scale = WidgetScale::parse(percent).unwrap();
+            let original = WidgetPreferences {
+                widget_scale: scale,
+                ..Default::default()
+            };
+            let raw = serde_json::to_value(&original).unwrap();
+            assert_eq!(raw["widget_scale"], percent);
+            let restored: WidgetPreferences = serde_json::from_value(raw).unwrap();
+            assert_eq!(restored, original);
+        }
+        for invalid in [0, 99, 101, 124, 301, u16::MAX] {
+            assert!(WidgetScale::parse(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn widget_bounds_scale_but_strip_and_saved_positions_do_not() {
+        let mut prefs = WidgetPreferences {
+            widget_scale: WidgetScale(200),
+            x: Some(100),
+            y: Some(80),
+            ..Default::default()
+        };
+        assert_eq!(initial_size(&prefs), LogicalSize::new(1296.0, 928.0));
+        assert_eq!(
+            content_size(&prefs, 600.0, 500.0),
+            LogicalSize::new(600.0, 500.0)
+        );
+        assert_eq!(
+            content_size(&prefs, 1.0, 1.0),
+            LogicalSize::new(400.0, 144.0)
+        );
+        assert_eq!(
+            content_size(&prefs, 10000.0, 10000.0),
+            LogicalSize::new(1440.0, 1120.0)
+        );
+        assert_eq!(
+            content_size(&prefs, f64::NAN, f64::INFINITY),
+            initial_size(&prefs)
+        );
+        assert!(!should_place_after_resize(&prefs));
+        prefs.strip = true;
+        assert_eq!(prefs.scale_factor(), 1.0);
+        assert_eq!(initial_size(&prefs), LogicalSize::new(560.0, 40.0));
+        assert_eq!(
+            content_size(&prefs, 10000.0, 10000.0),
+            LogicalSize::new(900.0, 40.0)
+        );
+        assert_eq!(prefs.widget_scale, WidgetScale(200));
+        assert_eq!((prefs.x, prefs.y), (Some(100), Some(80)));
+    }
+
+    #[test]
+    fn hidden_providers_round_trip() {
+        let original = WidgetPreferences {
+            hidden_providers: vec!["grok".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: WidgetPreferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn toggle_hidden_is_idempotent_and_sorted() {
+        let mut preferences = WidgetPreferences::default();
+        assert!(toggle_hidden(&mut preferences, "grok", true));
+        assert!(!toggle_hidden(&mut preferences, "grok", true));
+        assert_eq!(preferences.hidden_providers, vec!["grok"]);
+
+        assert!(toggle_hidden(&mut preferences, "claude", true));
+        assert_eq!(preferences.hidden_providers, vec!["claude", "grok"]);
+
+        assert!(toggle_hidden(&mut preferences, "grok", false));
+        assert_eq!(preferences.hidden_providers, vec!["claude"]);
+
+        assert!(!toggle_hidden(&mut preferences, "codex", false));
+        assert!(!toggle_hidden(&mut preferences, "  ", true));
+        assert_eq!(preferences.hidden_providers, vec!["claude"]);
+    }
+
+    #[test]
+    fn persist_replaces_the_file_atomically_and_round_trips() {
+        let dir = std::env::temp_dir().join("agentmeter-test-widget-preferences");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("widget.json");
+
+        let mut preferences = WidgetPreferences {
+            hidden_providers: vec!["grok".to_string()],
+            ..Default::default()
+        };
+        persist_to(&path, &preferences).unwrap();
+        // The second write replaces an existing file through the rename.
+        preferences.locked = true;
+        preferences.widget_scale = WidgetScale(200);
+        preferences.antigravity_claude_gpt_hidden = true;
+        preferences.language = Language::De;
+        persist_to(&path, &preferences).unwrap();
+
+        let restored: WidgetPreferences =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(restored, preferences);
+
+        let entries: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("widget.json")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

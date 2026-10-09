@@ -1,0 +1,54 @@
+/* Shared light/dark palette for Dashboard, Widget and Strip.
+   Keep view-specific geometry in dashboard.css and widget.css. */
+:root {
+  color-scheme: light;
+  --panel: radial-gradient(ellipse at top right, #e2ecfa, transparent 65%), #f2f5fa;
+  --sidebar: linear-gradient(155deg, #f9fbff, #eaf0fa);
+  --surface: linear-gradient(115deg, #fff, #f3f7fd);
+  /* Only Widget backgrounds are translucent; do not fade its text or controls. */
+  --widget-surface: linear-gradient(115deg, rgba(255, 255, 255, 0.94), rgba(243, 247, 253, 0.94));
+  --widget-header: rgba(255, 255, 255, 0.38);
+  --surface-strong: #fff;
+  --title: #192c44;
+  --section: #344b67;
+  --label: #536780;
+  --value: #243a56;
+  --loading: #60748e;
+  --accent: #1678d6;
+  --active: linear-gradient(100deg, #d2e5ff, #dfebfc);
+  --track: #dbe4ef;
+  --rule: #ccd8e7;
+  --chip: #e8eef7;
+  --hover: #e1ebf8;
+  --shadow: 0 6px 20px #243b5c08;
+  --ok: #148448;
+  --warn: #a66b00;
+  --crit: #d23842;
+  --pace-ahead: #926000;
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --panel: radial-gradient(ellipse at top right, #182b40a6, transparent 70%), #0d1721;
+  --sidebar: linear-gradient(155deg, #152233, #101c2b);
+  --surface: linear-gradient(115deg, #172430, #192838);
+  --widget-surface: linear-gradient(115deg, rgba(23, 36, 48, 0.94), rgba(25, 40, 56, 0.94));
+  --widget-header: rgba(255, 255, 255, 0.045);
+  --surface-strong: #142130;
+  --title: #f1f5fc;
+  --section: #d7e4f8;
+  --label: #b6c9e3;
+  --value: #e7effc;
+  --loading: #94aac4;
+  --accent: #38a5ff;
+  --active: linear-gradient(100deg, #164576, #1b3d70);
+  --track: #2a3b50;
+  --rule: #2c4157;
+  --chip: #223346;
+  --hover: #253950;
+  --shadow: 0 6px 20px #00000012;
+  --ok: #30eb83;
+  --warn: #ffce24;
+  --crit: #ff6371;
+  --pace-ahead: #ffce24;
+}

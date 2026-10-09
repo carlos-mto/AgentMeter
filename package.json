@@ -1,0 +1,16 @@
+{
+  "name": "agentmeter",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "test": "node --test tests/unit/*.test.js",
+    "release": "pwsh -NoProfile -File scripts/release.ps1",
+    "test:smoke:dashboard": "node tests/smoke/dashboard.smoke.mjs",
+    "test:smoke:accounts": "node tests/smoke/accounts.smoke.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

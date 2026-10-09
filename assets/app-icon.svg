@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>AgentMeter</title>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#152b45"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M48 190a100 100 0 1 1 160 0" stroke="#26d3f3" stroke-width="16"/>
+    <path d="M128 40v18M57 66l14 14M199 66l-14 14" stroke="#26d3f3" stroke-width="12"/>
+    <path d="M128 150l49-49" stroke="#f1f5fc" stroke-width="18"/>
+  </g>
+  <circle cx="128" cy="150" r="12" fill="#f1f5fc"/>
+</svg>

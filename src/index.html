@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgentMeter</title>
+    <script>
+      (() => {
+        const stored = localStorage.getItem("agent-meter-theme");
+        document.documentElement.dataset.theme = stored === "light" || stored === "dark"
+          ? stored : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      })();
+    </script>
+    <link rel="stylesheet" href="palette.css" />
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <symbol id="icon-agentmeter" viewBox="0 0 24 24"><path d="M4 19a10 10 0 1 1 16 0M12 4v2M5 7l1.5 1.5M19 7l-1.5 1.5M12 14l4-4"/><circle cx="12" cy="14" r="1.5"/></symbol>
+        <symbol id="icon-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7-11 11M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/></symbol>
+        <symbol id="icon-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7M5 9v12h5v-7h4v7h5V9" /></symbol>
+        <symbol id="icon-services" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8m-4-4v4M7 8h2m3 0h5M7 12h6" /></symbol>
+        <symbol id="icon-statistics" viewBox="0 0 24 24"><path d="M4 21V12h3v9m4 0V3h3v18m4 0V8h3v13" /></symbol>
+        <symbol id="icon-settings" viewBox="0 0 24 24"><path d="m9 3 1-1h4l1 3 3 1 3 1 1 4-2 2-1 3v3l-4 2-3-2-3-1-3 1-2-4 2-3V9L4 6l3-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
+        <symbol id="icon-language" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18M5 7h14M5 17h14"/></symbol>
+        <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20 14A8 8 0 0 1 10 4a8.5 8.5 0 1 0 10 10Z"/><path d="M17 2v4m-2-2h4"/></symbol>
+        <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+        <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 5v6h-6M4 19v-6h6M5 8a8 8 0 0 1 13-3l2 3M4 16l2 3a8 8 0 0 0 13-3"/></symbol>
+        <symbol id="icon-session" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol>
+        <symbol id="icon-weekly" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 2v6m8-6v6M4 11h16m-12 4h1m3 0h1m3 0h1M8 18h1m3 0h1"/></symbol>
+        <symbol id="icon-window" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></symbol>
+        <symbol id="icon-widget" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9h10M7 14h5"/></symbol>
+        <symbol id="icon-strip" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="3"/><path d="M6 12h3m3 0h2m3 0h1"/></symbol>
+        <symbol id="mark-claude" viewBox="0 0 32 32"><path d="M16 3v26M3 16h26M7 7l18 18M7 25 25 7M11 4l10 24M4 11l24 10M4 21l24-10M11 28 21 4" stroke-width="2.5"/></symbol>
+        <symbol id="mark-codex" viewBox="0 0 32 32"><g stroke-width="1.5"><path id="knot" d="M16 7a7 7 0 0 1 12 5v7l-12 7-7-4V12l7-4 9 5v8"/><use href="#knot" transform="rotate(60 16 16)"/><use href="#knot" transform="rotate(120 16 16)"/></g></symbol>
+        <symbol id="mark-antigravity" viewBox="0 0 32 32"><path d="m5 26 11-21 11 21h-6l-5-11-5 11Z" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="mark-grok" viewBox="0 0 32 32"><path d="m6 7 18 20h-6L5 12m21-9L8 27M25 4v15" stroke-width="2.8"/></symbol>
+        <symbol id="mark-grok_bot" viewBox="0 0 32 32"><rect x="5" y="8" width="22" height="19" rx="6"/><path d="M16 3v5m-6 9h2m8 0h2m-11 6h10" stroke-width="2.5"/></symbol>
+      </defs>
+    </svg>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand" title="AgentMeter · v0.0.1"><span class="brand-mark"><svg aria-hidden="true"><use href="#icon-agentmeter"/></svg></span><span class="sr-only">AgentMeter</span></div>
+        <nav class="navigation" aria-label="Main navigation" data-i18n-aria="Main navigation">
+          <button class="nav-item" type="button" data-view="home" aria-current="page" data-i18n-aria="Home" data-i18n-title="Home"><svg aria-hidden="true"><use href="#icon-home"/></svg><span data-i18n="Home">Home</span></button>
+          <button class="nav-item" type="button" data-view="services" data-i18n-aria="Services" data-i18n-title="Services"><svg aria-hidden="true"><use href="#icon-services"/></svg><span data-i18n="Services">Services</span></button>
+          <button class="nav-item" type="button" data-view="statistics" data-i18n-aria="Statistics" data-i18n-title="Statistics"><svg aria-hidden="true"><use href="#icon-statistics"/></svg><span data-i18n="Statistics">Statistics</span></button>
+          <button class="nav-item" type="button" data-view="settings" data-i18n-aria="Settings" data-i18n-title="Settings"><svg aria-hidden="true"><use href="#icon-settings"/></svg><span data-i18n="Settings">Settings</span></button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="companion-controls" role="group" aria-label="Desktop views" data-i18n-aria="Desktop views">
+            <span class="sidebar-caption" data-i18n="Desktop views">Desktop views</span>
+            <button class="tool" id="widget-mode" type="button" title="Show desktop widget" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-widget"/></svg><span>Widget</span></button>
+            <button class="tool" id="strip-mode" type="button" title="Show strip" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-strip"/></svg><span>Strip</span></button>
+          </div>
+          <button class="nav-item" id="theme" type="button" data-i18n-title="Switch theme" data-i18n-aria="Switch theme"><svg class="icon-to-dark" aria-hidden="true"><use href="#icon-moon"/></svg><svg class="icon-to-light" aria-hidden="true"><use href="#icon-sun"/></svg><span data-i18n="Theme">Theme</span><span class="nav-arrow" aria-hidden="true">›</span></button>
+          <button class="nav-item" id="language-shortcut" type="button" data-i18n-aria="Language" data-i18n-title="Language"><svg aria-hidden="true"><use href="#icon-language"/></svg><span data-i18n="Language">Language</span><span class="nav-arrow" aria-hidden="true">›</span></button>
+          <footer class="deck-foot"><span class="sr-only">v0.0.1</span><a href="https://github.com/carlos-mto/AgentMeter" target="_blank" rel="noopener noreferrer" data-i18n-title="GitHub Repo" data-i18n-aria="GitHub Repo"><svg aria-hidden="true"><use href="#icon-external"/></svg><span class="sr-only" data-i18n="GitHub Repo">GitHub Repo</span></a></footer>
+        </div>
+      </aside>
+      <main class="deck" id="dashboard-content">
+        <header class="deck-head">
+          <div class="page-heading"><h1 id="page-title" tabindex="-1" data-i18n="Home">Home</h1><p id="page-description" data-i18n="Monitor your AI service usage limits in real time.">Monitor your AI service usage limits in real time.</p></div>
+          <div class="header-tools">
+            <div class="refresh-group"><span class="refresh-symbol" aria-hidden="true"><svg><use href="#icon-refresh"/></svg></span><div class="refresh-status" aria-live="off"><span id="updated">Last updated: —</span><span id="countdown">Refresh scheduled</span></div></div>
+            <div class="language-control"><svg aria-hidden="true"><use href="#icon-language"/></svg><label class="sr-only" for="language-select" data-i18n="Language">Language</label><select id="language-select" disabled aria-label="Language" data-i18n-aria="Language" aria-describedby="language-error"></select><span id="language-error" role="alert" hidden></span></div>
+          </div>
+        </header>
+        <section class="services-panel" id="services-panel" aria-label="Accounts" data-i18n-aria="Accounts" hidden>
+          <div class="settings-card"><h2 data-i18n="Accounts">Accounts</h2><p data-i18n="Claude and Codex profiles use separate sign-ins. Existing sessions are unchanged.">Claude and Codex profiles use separate sign-ins. Existing sessions are unchanged.</p><div id="account-settings"></div></div>
+        </section>
+        <section class="provider-controls" id="provider-controls" aria-label="AI sources & display" data-i18n-aria="AI sources & display"></section>
+        <div class="providers" id="providers"></div>
+        <section class="statistics-panel" id="statistics-panel" aria-label="Statistics" data-i18n-aria="Statistics" hidden></section>
+        <section class="settings-panel" id="settings-panel" aria-label="Settings" data-i18n-aria="Settings" hidden>
+          <div class="settings-card"><h2 data-i18n="Appearance">Appearance</h2><p data-i18n="Your theme and language apply to all views.">Your theme and language apply to all views.</p><div class="settings-actions"><button class="action-button" id="settings-theme" type="button" data-i18n="Switch theme">Switch theme</button><button class="action-button" id="settings-language" type="button" data-i18n="Language">Language</button></div></div>
+          <div class="settings-card"><h2 data-i18n="Quota values">Quota values</h2><div id="settings-usage"></div></div>
+          <div class="settings-card"><h2 data-i18n="Desktop views">Desktop views</h2><p data-i18n="Use Widget or Strip in the sidebar. Their size, position and taskbar pin are preserved.">Use Widget or Strip in the sidebar. Their size, position and taskbar pin are preserved.</p></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="dashboard.js"></script>
+  </body>
+</html>

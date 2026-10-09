@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgentMeter Widget</title>
+    <script>
+      (() => {
+        const stored = localStorage.getItem("agent-meter-theme");
+        document.documentElement.dataset.theme =
+          stored === "light" || stored === "dark"
+            ? stored
+            : matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+      })();
+    </script>
+    <link rel="stylesheet" href="palette.css" />
+    <link rel="stylesheet" href="widget.css" />
+    <link rel="stylesheet" href="widget-neon.css" />
+  </head>
+  <body>
+    <svg class="widget-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+      <symbol id="widget-icon-agentmeter" viewBox="0 0 24 24"><path d="M4 19a10 10 0 1 1 16 0M12 4v2M5 7l1.5 1.5M19 7l-1.5 1.5M12 14l4-4"/><circle cx="12" cy="14" r="1.5"/></symbol>
+      <symbol id="widget-icon-codex" viewBox="0 0 32 32"><path d="m16 3 12 7v14l-12 7-12-7V10Z"/><path d="m16 11 5 3v6l-5 3-5-3v-6Zm-5 3 5 3 5-3m-5 3v6"/></symbol>
+      <symbol id="widget-icon-claude" viewBox="0 0 32 32"><path d="M16 3v26M3 16h26M7 7l18 18M7 25 25 7M11 4l10 24M4 11l24 10M4 21l24-10M11 28 21 4"/></symbol>
+      <symbol id="widget-icon-antigravity" viewBox="0 0 32 32"><path d="m5 27 11-22 11 22h-6l-5-11-5 11Z"/></symbol>
+      <symbol id="widget-icon-grok" viewBox="0 0 32 32"><path d="m7 6 18 20M25 6 7 26M11 6l16 20"/></symbol>
+      <symbol id="widget-icon-grok_bot" viewBox="0 0 32 32"><rect x="5" y="9" width="22" height="18" rx="4"/><path d="M16 9V4m-5 13h1m8 0h1M11 22h10"/></symbol>
+      <symbol id="widget-icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></symbol>
+      <symbol id="widget-icon-user" viewBox="0 0 24 24"><circle cx="12" cy="7" r="4"/><path d="M4 22v-3a7 7 0 0 1 7-7h2a7 7 0 0 1 7 7v3Z"/></symbol>
+    </defs></svg>
+    <section class="widget" aria-label="AgentMeter Widget">
+      <header class="widget-head" id="widget-drag-handle">
+        <span class="widget-brand"><svg class="widget-brand-mark" viewBox="0 0 24 24" aria-hidden="true"><use href="#widget-icon-agentmeter"/></svg><span class="widget-title">AgentMeter</span></span>
+        <span class="widget-status" id="widget-status" data-i18n="Waiting for dashboard…">Waiting for dashboard…</span>
+        <div class="widget-controls">
+          <button
+            id="taskbar-overlay"
+            type="button"
+            title="Keep strip above the taskbar"
+            aria-label="Keep strip above the taskbar"
+            aria-pressed="false"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="2" y="2.5" width="12" height="11" rx="2" />
+              <path d="M2.5 10.5h11" />
+              <path d="m7 5 2 2M9 5 7 7M8 7v2" />
+            </svg>
+          </button>
+
+          <button id="open-dashboard" type="button" title="Open dashboard" aria-label="Open dashboard" data-i18n-title="Open dashboard" data-i18n-aria="Open dashboard">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="2.5" y="2.5" width="11" height="11" rx="2" />
+              <path d="M5 6h6M5 9h4" />
+            </svg>
+          </button>
+          <button
+            id="lock-widget"
+            type="button"
+            title="Lock widget position"
+            aria-label="Lock widget"
+          >
+            <svg class="lock-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
+              <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+            </svg>
+            <svg class="unlock-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
+              <path d="M5.5 7V5a2.5 2.5 0 0 1 4.8-1" />
+            </svg>
+          </button>
+          <button id="widget-accounts" type="button" title="Accounts" aria-label="Accounts" data-i18n-title="Accounts" data-i18n-aria="Accounts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3Zm13-17a3 3 0 0 1 0 6m1 3a5 5 0 0 1 4 5v3h-3"/></svg></button>
+          <button id="hide-widget" type="button" title="Hide widget" aria-label="Hide widget">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="m4 4 8 8M12 4l-8 8" />
+            </svg>
+          </button>
+        </div>
+      </header>
+      <div class="widget-scale" id="widget-scale-controls" role="group" aria-label="Widget size" data-i18n-aria="Widget size">
+        <svg class="widget-size-mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M12 16v5m-5 0h10"/></svg>
+        <span class="widget-scale-label" title="Extra size on top of Windows display scaling" data-i18n-title="Extra size on top of Windows display scaling" data-i18n="Widget size">Widget size</span>
+        <div class="widget-controls">
+          <button id="widget-scale-down" type="button" title="Decrease widget size" aria-label="Decrease widget size" data-i18n-title="Decrease widget size" data-i18n-aria="Decrease widget size">−</button>
+          <output id="widget-scale-value" aria-live="polite" aria-label="Current widget size" data-i18n-aria="Current widget size">100%</output>
+          <button id="widget-scale-up" type="button" title="Increase widget size" aria-label="Increase widget size" data-i18n-title="Increase widget size" data-i18n-aria="Increase widget size">+</button>
+        </div>
+      </div>
+      <span id="widget-scale-error" class="widget-scale-error" role="alert" hidden></span>
+      <main class="widget-providers" id="widget-providers" aria-live="polite"></main>
+    </section>
+
+    <script type="module" src="widget.js"></script>
+  </body>
+</html>
