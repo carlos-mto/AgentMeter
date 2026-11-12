@@ -101,6 +101,8 @@ Der **Claude+GPT-Augenknopf von Antigravity** blendet diesen Pool in allen Ansic
 
 Jedes Profil besitzt eigene Kontingent-/Cache-/Wartezeitdaten. Verfügbare lokale Benutzernamen haben Vorrang vor Aliasen; im Widget erscheinen sie kleiner und in Kleinbuchstaben. E-Mail-Domains und Tokens werden weder angezeigt noch im Profilregister gespeichert. Einen Anbieter auszublenden pausiert alle seine Konten. Der Widget-Knopf **Accounts** öffnet direkt Services.
 
+Sind zwei Profile mit demselben Konto angemeldet (z. B. dem aktuellen CLI-Konto und einem benannten Profil), zeigen beide denselben Benutzernamen und dasselbe Kontingent; AgentMeter kennzeichnet sie als **Doppeltes Konto**. Melde eines der Profile mit einem anderen Konto an oder entferne das überzählige Profil.
+
 Mehrkontenverwaltung ist derzeit auf **Claude und Codex** beschränkt. Andere Anbieter behalten ihr bisheriges Einzelkontoverhalten; es gibt keine automatische Kontenrotation.
 
 <a id="widget-strip"></a>

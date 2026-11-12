@@ -12,6 +12,7 @@ export function accountProviders(providers, registry = {}) {
       accountId: profile.id,
       accountLabel: profile.username || (profile.id === "default" ? null : profile.label),
       multipleAccounts: profiles.length > 1,
+      duplicate: profile.duplicate === true,
     }));
   });
 }

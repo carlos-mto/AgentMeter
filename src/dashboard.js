@@ -355,6 +355,7 @@ function renderProvider(provider, quota) {
   const head = el("div", "provider-head");
   head.append(el("h2", "provider-name", provider.name));
   if (provider.multipleAccounts || provider.accountLabel) head.append(el("span", "plan account-label", provider.accountLabel || t("Current account")));
+  if (provider.duplicate) head.append(duplicateBadge());
 
   if (quota?.status === "ok" && quota.plan) {
     head.append(el("span", "plan", quota.plan));
@@ -651,6 +652,12 @@ async function changeAccount(command, args = {}, focusId = "account-provider") {
   }
 }
 
+function duplicateBadge() {
+  const badge = el("span", "plan account-duplicate", t("Duplicate account"));
+  badge.title = t("Signed in to the same account as another profile, so both show the same quota.");
+  return badge;
+}
+
 function renderAccounts(force = false) {
   const root = document.getElementById("account-settings");
   if (!force && root.contains(document.activeElement)) return;
@@ -679,6 +686,10 @@ function renderAccounts(force = false) {
     const status = !quota ? t("Reading…") : quota.status === "not_configured" ? t("Not signed in")
       : ["ok", "unavailable"].includes(quota.status) ? t("Connected") : t("Needs attention");
     copy.append(el("span", "account-status", status));
+    if (profile.duplicate) {
+      row.dataset.duplicate = "true";
+      copy.append(duplicateBadge());
+    }
     const actions = el("div", "account-actions");
     const choice = el("label", "account-selection");
     const radio = el("input");
@@ -1107,6 +1118,8 @@ async function refreshQuotas(providers = activeAccountProviders()) {
         const accountKey = profile.id === "default" ? profile.provider : `${profile.provider}:${profile.id}`;
         const currentProfile = accountRegistry.profiles.find(current => current.provider === profile.provider && current.id === profile.id);
         if (currentProfile && checkedAccountKeys.has(accountKey)) currentProfile.username = profile.username;
+        // Duplicate state depends on every profile, so it refreshes for all of them.
+        if (currentProfile) currentProfile.duplicate = profile.duplicate === true;
       }
     } catch { /* Display metadata must not block quota rendering. */ }
     render();

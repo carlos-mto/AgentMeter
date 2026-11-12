@@ -31,6 +31,15 @@ test("account keys isolate providers and hiding a source pauses every account", 
   assert.equal(accountProviders(providers, {})[0].accountId, "default");
 });
 
+test("duplicate account flag reaches provider entries and both UI surfaces", () => {
+  const flagged = { profiles: registry.profiles.map(profile => profile.provider === "claude" ? { ...profile, duplicate: true } : profile), selected: {} };
+  assert.deepEqual(accountProviders(providers, flagged).map(entry => entry.duplicate), [true, true, false, false, undefined]);
+  const main = fs.readFileSync(new URL("../../src/dashboard.js", import.meta.url), "utf8");
+  assert.match(main, /if \(provider\.duplicate\) head\.append\(duplicateBadge\(\)\)/);
+  assert.match(main, /if \(profile\.duplicate\) \{\s*row\.dataset\.duplicate = "true";/);
+  assert.match(main, /currentProfile\.duplicate = profile\.duplicate === true/);
+});
+
 test("companion selection never mixes account quotas or cooldowns, statistics include all accounts", () => {
   const schedule = { claude: { backoffUntil: 100 }, "claude:work": { backoffUntil: 900 } };
   const snapshot = companionAccountSnapshot(providers, registry, results, schedule);

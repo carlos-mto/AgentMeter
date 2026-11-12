@@ -101,6 +101,8 @@ Il **pulsante a forma di occhio Claude+GPT di Antigravity** nasconde/ripristina 
 
 Ogni profilo ha quote/cache/attese indipendenti. I nomi utente locali disponibili hanno precedenza sugli alias; nel Widget sono più piccoli e in minuscolo. Domini e-mail e token non sono mostrati né memorizzati nel registro dei profili. Nascondere un provider sospende tutti i suoi account. Il pulsante **Accounts** del Widget apre direttamente Services.
 
+Se due profili hanno effettuato l'accesso con lo stesso account (ad esempio l'account attuale della CLI e un profilo con nome), entrambi mostrano lo stesso nome utente e la stessa quota; AgentMeter li contrassegna come **Account duplicato**. Accedi con un altro account in uno dei due o rimuovi il profilo in più.
+
 La gestione di più account riguarda attualmente **solo Claude e Codex**. Gli altri provider mantengono il comportamento a singolo account; non è prevista rotazione automatica.
 
 <a id="widget-strip"></a>
