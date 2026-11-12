@@ -181,6 +181,7 @@ h1:focus { outline: none; }
 .account-form button { justify-self: start; }
 .account-message { margin-top: 12px !important; }
 .account-label { text-transform: none; }
+.plan.account-duplicate { color: var(--warn); justify-self: start; }
 
 .stat-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 22px; }
 .stat-card { color: var(--label); }

@@ -101,6 +101,8 @@ The **Antigravity Claude+GPT eye button** hides/restores that pool in all views.
 
 Each profile has independent quota/cache/retry state. Available local usernames are preferred over aliases; Widget renders them smaller and lowercase. Email domains and tokens are not shown or stored in the profile registry. Hiding a provider pauses all of its accounts. The Widget **Accounts** button opens Services directly.
 
+If two profiles are signed in to the same account (for example the current CLI account and a named profile), both show the same username and quota; AgentMeter marks them as **Duplicate account**. Sign one of them in with a different account or remove the extra profile.
+
 Multi-account management currently covers **Claude and Codex only**. Other providers keep their existing single-account behavior; there is no automatic account rotation.
 
 <a id="widget-strip"></a>

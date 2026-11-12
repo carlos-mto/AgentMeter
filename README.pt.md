@@ -101,6 +101,8 @@ O **botão de olho Claude+GPT do Antigravity** oculta/restaura esse grupo em tod
 
 Cada perfil tem estado de cota/cache/espera independente. Nomes locais disponíveis têm preferência sobre os aliases; o Widget os mostra menores e em minúsculas. Domínios de e-mail e tokens não são exibidos nem armazenados no registro de perfis. Ocultar um provedor pausa todas as suas contas. O botão **Accounts** do Widget abre Services diretamente.
 
+Se dois perfis tiverem a sessão iniciada com a mesma conta (por exemplo, a conta atual da CLI e um perfil nomeado), ambos mostram o mesmo nome de usuário e a mesma cota; o AgentMeter os marca como **Conta duplicada**. Entre com outra conta em um deles ou remova o perfil extra.
+
 O gerenciamento de várias contas abrange atualmente **somente Claude e Codex**. Outros provedores mantêm o comportamento de conta única; não existe rotação automática de contas.
 
 <a id="widget-strip"></a>

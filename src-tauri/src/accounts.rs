@@ -21,6 +21,9 @@ pub struct AccountProfile {
     // Read-only display metadata; registry input cannot supply an identity.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    // Read-only: another profile of the same provider is signed in to this account.
+    #[serde(skip_deserializing, skip_serializing_if = "std::ops::Not::not")]
+    pub duplicate: bool,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -108,7 +111,37 @@ fn metadata_name(value: &serde_json::Value) -> Option<String> {
     .find_map(username_from_text)
 }
 
-fn jwt_username(token: &str) -> Option<String> {
+/// Local identity read once per profile. `key` is private: it only lets the
+/// snapshot detect profiles signed in to the same account and is never serialized.
+#[derive(Default)]
+struct Identity {
+    username: Option<String>,
+    key: Option<String>,
+}
+
+// Full lowercased email, else an account id. Prefixed so the two kinds never collide.
+fn identity_key<'a>(
+    emails: impl IntoIterator<Item = &'a serde_json::Value>,
+    id: Option<&serde_json::Value>,
+) -> Option<String> {
+    emails
+        .into_iter()
+        .filter_map(|value| {
+            value
+                .get("emailAddress")
+                .or_else(|| value.get("email"))?
+                .as_str()
+        })
+        .map(|email| email.trim().to_lowercase())
+        .find(|email| email.contains('@'))
+        .map(|email| format!("email:{email}"))
+        .or_else(|| {
+            let id = id?.as_str()?.trim();
+            (!id.is_empty()).then(|| format!("id:{id}"))
+        })
+}
+
+fn jwt_identity(token: &str) -> Option<Identity> {
     let payload = token.split('.').nth(1)?;
     if payload.len() > 64 * 1024 {
         return None;
@@ -121,9 +154,17 @@ fn jwt_username(token: &str) -> Option<String> {
         .flatten()
         .filter_map(|value| value.get("email")?.as_str())
         .find_map(username_from_text);
-    email_username
-        .or_else(|| metadata_name(&claims))
-        .or_else(|| profile.and_then(metadata_name))
+    Some(Identity {
+        username: email_username
+            .or_else(|| metadata_name(&claims))
+            .or_else(|| profile.and_then(metadata_name)),
+        key: identity_key(profile.into_iter().chain([&claims]), claims.get("sub")),
+    })
+}
+
+#[cfg(test)]
+fn jwt_username(token: &str) -> Option<String> {
+    jwt_identity(token)?.username
 }
 
 fn provider_env_is_set(provider: &str) -> bool {
@@ -161,7 +202,7 @@ fn claude_identity_paths(dir: &Path, home: Option<&Path>, env_set: bool) -> Vec<
     }
 }
 
-fn credential_username(provider: &str, dir: &Path) -> Option<String> {
+fn credential_identity(provider: &str, dir: &Path) -> Option<Identity> {
     match provider {
         "claude" => {
             let credentials = read_metadata(&dir.join(".credentials.json"))?;
@@ -171,23 +212,51 @@ fn credential_username(provider: &str, dir: &Path) -> Option<String> {
             }
             let home = dirs::home_dir();
             let env_set = provider_env_is_set("claude");
-            claude_identity_paths(dir, home.as_deref(), env_set)
-                .into_iter()
-                .find_map(|path| {
-                    let config = read_metadata(&path)?;
-                    metadata_name(config.get("oauthAccount")?)
-                })
-                .or_else(|| metadata_name(oauth))
+            let account = |value: &serde_json::Value| Identity {
+                username: metadata_name(value),
+                key: identity_key([value], value.get("accountUuid")),
+            };
+            Some(
+                claude_identity_paths(dir, home.as_deref(), env_set)
+                    .into_iter()
+                    .find_map(|path| {
+                        let identity = account(read_metadata(&path)?.get("oauthAccount")?);
+                        (identity.username.is_some() || identity.key.is_some()).then_some(identity)
+                    })
+                    .unwrap_or_else(|| account(oauth)),
+            )
         }
         "codex" => {
             let auth = read_metadata(&dir.join("auth.json"))?;
             let tokens = auth.get("tokens")?;
-            ["id_token", "access_token"]
-                .into_iter()
-                .find_map(|key| jwt_username(tokens.get(key)?.as_str()?))
+            let mut identity = Identity::default();
+            for key in ["id_token", "access_token"] {
+                let Some(found) = tokens
+                    .get(key)
+                    .and_then(|token| token.as_str())
+                    .and_then(jwt_identity)
+                else {
+                    continue;
+                };
+                identity.username = identity.username.or(found.username);
+                // An email key beats an id-only key from an earlier token.
+                if identity
+                    .key
+                    .as_deref()
+                    .is_none_or(|k| !k.starts_with("email:"))
+                {
+                    identity.key = found.key.or(identity.key);
+                }
+            }
+            Some(identity)
         }
         _ => None,
     }
+}
+
+#[cfg(test)]
+fn credential_username(provider: &str, dir: &Path) -> Option<String> {
+    credential_identity(provider, dir)?.username
 }
 
 fn valid_id(id: &str) -> bool {
@@ -264,6 +333,7 @@ impl AccountRegistry {
                 label: "Current account".into(),
                 config_dir: default_config_dir(provider)?,
                 username: None,
+                duplicate: false,
             });
         }
         self.profiles
@@ -280,8 +350,21 @@ impl AccountRegistry {
                 .profiles
                 .insert(0, self.profile(provider, DEFAULT_ACCOUNT)?);
         }
+        let mut keys = Vec::with_capacity(snapshot.profiles.len());
         for profile in &mut snapshot.profiles {
-            profile.username = credential_username(&profile.provider, &profile.config_dir);
+            let identity = credential_identity(&profile.provider, &profile.config_dir);
+            profile.username = identity.as_ref().and_then(|i| i.username.clone());
+            keys.push(
+                identity
+                    .and_then(|i| i.key)
+                    .map(|key| (profile.provider.clone(), key)),
+            );
+        }
+        // Keys stay local to this function; only the boolean leaves the snapshot.
+        for (profile, key) in snapshot.profiles.iter_mut().zip(&keys) {
+            profile.duplicate = key
+                .as_ref()
+                .is_some_and(|key| keys.iter().flatten().filter(|other| *other == key).count() > 1);
         }
         Ok(snapshot)
     }
@@ -433,6 +516,7 @@ impl AccountState {
                 label: label.into(),
                 config_dir,
                 username: None,
+                duplicate: false,
             });
             Ok(())
         })
@@ -809,6 +893,7 @@ mod tests {
                     label: "Work".into(),
                     config_dir: root(),
                     username: None,
+                    duplicate: false,
                 }],
                 ..Default::default()
             };
@@ -819,5 +904,80 @@ mod tests {
             ..Default::default()
         };
         assert!(registry.validate().is_err());
+    }
+
+    fn claude_dir(root: &Path, name: &str, email: Option<&str>) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"tok"}}"#,
+        )
+        .unwrap();
+        if let Some(email) = email {
+            std::fs::write(
+                dir.join(".claude.json"),
+                serde_json::json!({"oauthAccount":{"emailAddress":email}}).to_string(),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    fn codex_dir(root: &Path, name: &str, email: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::json!({"email": email}).to_string());
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::json!({"tokens":{"id_token":format!("h.{payload}.s")}}).to_string(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn named<'a>(snapshot: &'a AccountRegistry, label: &str) -> &'a AccountProfile {
+        snapshot.profiles.iter().find(|p| p.label == label).unwrap()
+    }
+
+    #[test]
+    fn profiles_signed_in_to_the_same_account_are_flagged_without_leaking_identity() {
+        let root = root();
+        let state = AccountState::at(Ok(root.join("registry")));
+        let dir = |name, email| claude_dir(&root, name, email);
+        let add = |provider: &str, label: &str, dir: &Path| {
+            state
+                .add(provider, label, Some(dir.to_str().unwrap()))
+                .unwrap()
+        };
+        add("claude", "A", &dir("a", Some("Dup.User@Dupes.invalid")));
+        add("claude", "B", &dir("b", Some("dup.user@dupes.invalid")));
+        add("claude", "C", &dir("c", Some("dup.user@other.invalid")));
+        std::fs::create_dir_all(root.join("nocreds")).unwrap();
+        add("claude", "NoCreds", &root.join("nocreds"));
+        add(
+            "codex",
+            "X",
+            &codex_dir(&root, "x", "dup.user@dupes.invalid"),
+        );
+        let snapshot = add(
+            "claude",
+            "Lonely",
+            &dir("lonely", Some("solo@solo.invalid")),
+        );
+        assert!(named(&snapshot, "A").duplicate && named(&snapshot, "B").duplicate);
+        assert!(
+            !named(&snapshot, "C").duplicate,
+            "same local part, other domain"
+        );
+        assert!(!named(&snapshot, "X").duplicate, "different provider");
+        assert!(!named(&snapshot, "NoCreds").duplicate);
+        assert!(!named(&snapshot, "Lonely").duplicate);
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(serialized.contains("\"duplicate\":true"));
+        assert!(!serialized.contains("dupes.invalid") && !serialized.contains("email:"));
+        let stored = std::fs::read_to_string(root.join("registry/accounts.json")).unwrap();
+        assert!(!stored.contains("duplicate") && !stored.contains("dupes.invalid"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

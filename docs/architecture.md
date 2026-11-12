@@ -178,6 +178,11 @@ implicit default preserves its legacy cache paths; named profiles use their own
 subdirectories. Claude fetch serialization across profiles does not mean they
 share quota/cache state.
 
+`accounts.rs` also flags `duplicate` profiles: when several profiles of one provider
+resolve to the same private identity key (full lowercased email, else account id),
+the snapshot sets a read-only `duplicate` boolean on each. The key is compared only
+in memory; it is never serialized, published or persisted in `accounts.json`.
+
 [claude_diagnostics.rs](../src-tauri/src/providers/claude_diagnostics.rs) retains at most
 **64** allowlisted HTTP/retry events. Error classification reads at most **16 KiB**;
 raw bodies, arbitrary headers, tokens and account data are not saved. Cached
