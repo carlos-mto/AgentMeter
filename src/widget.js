@@ -140,6 +140,11 @@ function renderProvider(provider, quota) {
   const accountLabel = provider.accountLabel || (provider.multipleAccounts ? t("Current account") : null);
   name.title = [provider.name, accountLabel, quota?.plan].filter(Boolean).join(" · ");
   heading.append(name);
+  if (!preferences.strip && quota?.plan) {
+    const plan = el("span", "plan-label", quota.plan);
+    plan.title = quota.plan;
+    heading.append(plan);
+  }
   if (!preferences.strip) {
     const mark = el("span", "provider-mark");
     mark.append(widgetIcon(provider.id));

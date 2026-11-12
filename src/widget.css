@@ -194,6 +194,7 @@ body {
 }
 
 .provider-name {
+  min-width: 0;
   overflow: hidden;
   color: var(--title);
   font-size: 0.625rem;
@@ -201,6 +202,13 @@ body {
   letter-spacing: 0.065em;
   text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.plan-label {
+  flex-shrink: 0;
+  color: var(--label);
+  font-size: 0.46875rem;
   white-space: nowrap;
 }
 
@@ -371,6 +379,7 @@ body {
 :root[data-mode="strip"] .widget-title,
 :root[data-mode="strip"] .widget-status,
 :root[data-mode="strip"] #lock-widget,
+:root[data-mode="strip"] .plan-label,
 :root[data-mode="strip"] .cached-label {
   display: none;
 }
