@@ -76,8 +76,12 @@ pub fn set_enabled(_enable: bool) -> Result<(), String> {
 }
 
 /// Refresh the executable path of an enabled entry.
-/// A disabled entry stays absent.
+/// A disabled entry stays absent. Dev builds never repoint it: they load the
+/// frontend from the CLI dev server, which is gone after a reboot.
 pub fn refresh_enabled_path() -> Result<(), String> {
+    if tauri::is_dev() {
+        return Ok(());
+    }
     if enabled() {
         set_enabled(true)?;
     }
